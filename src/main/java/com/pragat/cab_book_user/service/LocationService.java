@@ -1,0 +1,155 @@
+package com.pragat.cab_book_user.service;
+
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.pragat.cab_book_user.LocationEvent;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.data.geo.Point;
+import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.kafka.annotation.KafkaListener;
+import org.springframework.kafka.support.Acknowledgment;
+import org.springframework.kafka.support.KafkaHeaders;
+import org.springframework.messaging.handler.annotation.Header;
+import org.springframework.stereotype.Service;
+
+import java.time.Duration;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
+
+@Service
+public class LocationService {
+
+    @Value("${app.instance-id}")
+    private String instanceId;
+
+    private final ObjectMapper mapper = new ObjectMapper();
+
+    @Autowired
+    private StringRedisTemplate redisTemplate;
+
+    Logger log = LoggerFactory.getLogger(LocationService.class);
+
+    // Commented because using redis to store for dedupe
+//    private final Set<String> processedEventIds =
+//            ConcurrentHashMap.newKeySet();
+
+    @KafkaListener(topics = "Cab-Location-Latest", groupId = "user-group")
+    public void cabLocation(@Header(KafkaHeaders.RECEIVED_PARTITION) int partition,
+                            @Header(KafkaHeaders.RECEIVED_KEY) String cabId,
+                            LocationEvent locationEvent,
+                            Acknowledgment ack) throws JsonProcessingException, InterruptedException {
+
+        boolean success = false;
+
+        String processedKey = processedKey(locationEvent.eventId());
+//        String processingKey = processingKey(locationEvent.eventId());
+
+
+//        Boolean locked = redisTemplate.opsForValue().setIfAbsent(processingKey, instanceId, Duration.ofSeconds(90));
+//
+//        if (!locked) {
+//            System.out.println("SKIP already being processed eventId=" + locationEvent.eventId());
+//            ack.nack(Duration.ofSeconds(5));
+//            return;
+//        }
+
+
+        // Commented because we dont want to mix the event that are processing and that are processed.
+
+        String pKey = processedKey(locationEvent.eventId());
+        boolean firstTime = redisTemplate.opsForValue().setIfAbsent(pKey,"1", Duration.ofHours(24));
+
+        if (Boolean.FALSE.equals(firstTime)) {
+            System.out.println("SKIP already processed eventId=" + locationEvent.eventId());
+            ack.acknowledge();
+            return;
+        }
+
+
+        try {
+
+//            if (redisTemplate.hasKey(processedKey)) {
+//                System.out.println("SKIP already processed eventId=" + locationEvent.eventId());
+//                ack.acknowledge();
+//                redisTemplate.delete(processingKey);
+//                success = true;
+//                return;
+//            }
+
+              log.info("SLEEP START eventId={} time={}", locationEvent.eventId(), System.currentTimeMillis());
+
+              Thread.sleep(2000);
+
+              log.info("SLEEP END eventId={} time={}", locationEvent.eventId(), System.currentTimeMillis());
+
+//            if (locationEvent.cabId().equals("CAB-102") && locationEvent.seq() % 3 == 0) {
+//                throw new RuntimeException("Simulated failure for testing retries");
+//            }
+
+            System.out.println("Instance=" + instanceId
+                    + " partition=" + partition
+                    + " cab=" + locationEvent.cabId()
+                    + " seq=" + locationEvent.seq());
+
+            String locationKey = cabLocKey(locationEvent.cabId());
+
+            redisTemplate.opsForHash().put(locationKey, "lat", String.valueOf(locationEvent.lat()));
+            redisTemplate.opsForHash().put(locationKey, "lon", String.valueOf(locationEvent.lon()));
+            redisTemplate.opsForHash().put(locationKey, "ts", String.valueOf(locationEvent.timestamp()));
+            redisTemplate.opsForHash().put(locationKey, "seq", String.valueOf(locationEvent.seq()));
+            redisTemplate.opsForHash().put(locationKey, "eventId", String.valueOf(locationEvent.eventId()));
+            redisTemplate.expire(locationKey, 1, TimeUnit.DAYS);
+
+            redisTemplate.opsForGeo().add("cab:geo",new Point(locationEvent.lon(),locationEvent.lat()),locationEvent.cabId());
+
+            //redisTemplate.opsForValue().set(processedKey, "1", java.time.Duration.ofHours(24));
+
+            //System.out.println("PROCESSED partition=" + partition + " cab=" + locationEvent.cabId() + " seq=" + locationEvent.seq());
+
+            log.info("PROCESSED instance={} partition={} eventId={} cab={} seq={}",
+                    instanceId, partition, locationEvent.eventId(), locationEvent.cabId(), locationEvent.seq());
+
+            ack.acknowledge();
+
+            success = true;
+
+        } catch (Exception e) {
+            redisTemplate.delete(processedKey);
+            throw new RuntimeException(e);
+        } finally {
+//            if (success) {
+//                try {
+//                    String owner = redisTemplate.opsForValue().get(processingKey);
+//                    if (instanceId.equals(owner)) {
+//                        redisTemplate.delete(processingKey);
+//                    }
+//                } catch (Exception ignored) {
+//
+//                }
+//            }
+        }
+    }
+
+    @KafkaListener(topics = "Cab-Location.DLT", groupId = "user-group-dlt")
+    public void onDlt(String locationEvent) {
+
+        System.out.println("DLT Received for " + locationEvent);
+
+    }
+
+    private String processedKey(String eventId) {
+        return "event:processed:" + eventId;
+    }
+    private String processingKey(String eventId) {
+        return "event:processing:" + eventId;
+    }
+
+
+    private String cabLocKey(String cabId) {
+        return "cab:loc:" + cabId;
+    }
+}
