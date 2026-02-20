@@ -27,7 +27,15 @@ public class KafkaRetryConfig {
         // Retry 3 times with 2s backoff
         FixedBackOff fixedBackOff = new FixedBackOff(2000L, 3L);
 
-        return new DefaultErrorHandler(deadLetterPublishingRecoverer, fixedBackOff);
+        DefaultErrorHandler  defaultErrorHandler = new DefaultErrorHandler(deadLetterPublishingRecoverer, fixedBackOff);
+
+        // ✅ M12: mark exceptions that should NOT be retried (go straight to DLT)
+        defaultErrorHandler.addNotRetryableExceptions(
+                IllegalArgumentException.class,
+                com.fasterxml.jackson.core.JsonProcessingException.class
+        );
+
+        return defaultErrorHandler ;
     }
 
 }

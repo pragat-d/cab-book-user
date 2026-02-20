@@ -134,8 +134,8 @@ public class LocationService {
         }
     }
 
-    @KafkaListener(topics = "Cab-Location.DLT", groupId = "user-group-dlt")
-    public void onDlt(String locationEvent) {
+    @KafkaListener(topics = "Cab-Location-Latest.DLT", groupId = "user-group-dlt")
+    public void onDlt(LocationEvent locationEvent) {
 
         System.out.println("DLT Received for " + locationEvent);
 
