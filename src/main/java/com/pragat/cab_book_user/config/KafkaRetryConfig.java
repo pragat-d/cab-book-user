@@ -18,7 +18,7 @@ public class KafkaRetryConfig {
         // Send to <topic>.DLT automatically
         DeadLetterPublishingRecoverer deadLetterPublishingRecoverer = new DeadLetterPublishingRecoverer
                 (kafkaTemplate, (record, ex) -> {
-                    String dltTopic = record.topic().endsWith("DLT") ?  record.topic() : record.topic()+".DLT";
+                    String dltTopic = record.topic().endsWith(".DLT") ?  record.topic() : record.topic()+".DLT";
 
                     return new TopicPartition(dltTopic, record.partition());
 
@@ -34,6 +34,15 @@ public class KafkaRetryConfig {
                 IllegalArgumentException.class,
                 com.fasterxml.jackson.core.JsonProcessingException.class
         );
+
+        defaultErrorHandler.setRetryListeners((record, ex, deliveryAttempt) -> {
+            // deliveryAttempt starts at 1
+            System.out.println("Retry attempt " + deliveryAttempt +
+                    " for topic=" + record.topic() +
+                    " partition=" + record.partition() +
+                    " offset=" + record.offset() +
+                    " due to: " + ex.getClass().getSimpleName() + " - " + ex.getMessage());
+        });
 
         return defaultErrorHandler ;
     }
