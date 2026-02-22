@@ -10,6 +10,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.geo.Point;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.kafka.support.Acknowledgment;
@@ -18,7 +19,9 @@ import org.springframework.messaging.handler.annotation.Header;
 import org.springframework.stereotype.Service;
 
 import java.time.Duration;
+import java.util.Collections;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
@@ -36,6 +39,17 @@ public class LocationService {
     @Autowired
     private KafkaTemplate<String,Object> kafkaTemplate;
 
+    private static final DefaultRedisScript<Long> UNLOCK_SCRIPT = new DefaultRedisScript<>(
+            "if redis.call('GET', KEYS[1]) == ARGV[1] then " +
+                    "  return redis.call('DEL', KEYS[1]) " +
+                    "else " +
+                    "  return 0 " +
+                    "end",
+            Long.class
+    );
+
+
+
     Logger log = LoggerFactory.getLogger(LocationService.class);
 
     // Commented because using redis to store for dedupe
@@ -49,9 +63,28 @@ public class LocationService {
                             @Header(KafkaHeaders.OFFSET) long offset,
                             LocationEvent locationEvent) throws JsonProcessingException, InterruptedException {
 
+        String lockKey = lockKey(locationEvent.eventId());
+        String token = instanceId + ":" + UUID.randomUUID();
+
         boolean success = false;
 
         String processedKey = processedKey(locationEvent.eventId());
+
+        ConsumerGroupMetadata consumerGroupMetadata = new ConsumerGroupMetadata("user-group");
+
+        // Acquire lock (NX + TTL)
+        Boolean locked = redisTemplate.opsForValue()
+                .setIfAbsent(lockKey, token, Duration.ofSeconds(5));
+
+
+        if (Boolean.FALSE.equals(locked)) {
+            log.info("LOCKED; will retry. instance={} eventId={} partition={} offset={}",
+                    instanceId, locationEvent.eventId(), partition, offset);
+            throw new RuntimeException("Lock held; retry");
+        }
+
+        log.info("LOCK ACQUIRED instance={} eventId={} token={}", instanceId, locationEvent.eventId(), token);
+
 //        String processingKey = processingKey(locationEvent.eventId());
 
 
@@ -66,23 +99,21 @@ public class LocationService {
 
         // Commented because we dont want to mix the event that are processing and that are processed.
 
-        ConsumerGroupMetadata consumerGroupMetadata = new ConsumerGroupMetadata("user-group");
-
-        String pKey = processedKey(locationEvent.eventId());
-        boolean firstTime = redisTemplate.opsForValue().setIfAbsent(pKey,"1", Duration.ofHours(24));
-
-        if (Boolean.FALSE.equals(firstTime)) {
-            kafkaTemplate.executeInTransaction(kt -> {
-                kt.sendOffsetsToTransaction(offsetMap(topic, partition, offset), consumerGroupMetadata);
-                return true;
-            });
-            log.info("SKIP+COMMIT(TX) instance={} partition={} offset={} eventId={}",
-                    instanceId, partition, offset, locationEvent.eventId());
-            return;
-        }
-
 
         try {
+
+            String pKey = processedKey(locationEvent.eventId());
+            boolean firstTime = redisTemplate.opsForValue().setIfAbsent(pKey,"1", Duration.ofHours(24));
+
+            if (Boolean.FALSE.equals(firstTime)) {
+                kafkaTemplate.executeInTransaction(kt -> {
+                    kt.sendOffsetsToTransaction(offsetMap(topic, partition, offset), consumerGroupMetadata);
+                    return true;
+                });
+                log.info("SKIP+COMMIT(TX) instance={} partition={} offset={} eventId={}",
+                        instanceId, partition, offset, locationEvent.eventId());
+                return;
+            }
 
 //            if (redisTemplate.hasKey(processedKey)) {
 //                System.out.println("SKIP already processed eventId=" + locationEvent.eventId());
@@ -129,7 +160,7 @@ public class LocationService {
 
                 log.info("SLEEP START eventId={} time={}", locationEvent.eventId(), System.currentTimeMillis());
                 try {
-                    Thread.sleep(2000);
+                    Thread.sleep(8000);
                 } catch (InterruptedException e) {
                     throw new RuntimeException(e);
                 }
@@ -169,16 +200,16 @@ public class LocationService {
             redisTemplate.delete(processedKey);
             throw new RuntimeException(e);
         } finally {
-//            if (success) {
-//                try {
-//                    String owner = redisTemplate.opsForValue().get(processingKey);
-//                    if (instanceId.equals(owner)) {
-//                        redisTemplate.delete(processingKey);
-//                    }
-//                } catch (Exception ignored) {
-//
-//                }
-//            }
+            try {
+                // Safe unlock: delete only if value still equals token
+                Long deleted = redisTemplate.execute(
+                        UNLOCK_SCRIPT,
+                        Collections.singletonList(lockKey),
+                        token
+                );
+                log.info("UNLOCK eventId={} deleted={}", locationEvent.eventId(), deleted);
+            } catch (Exception ignored) {
+            }
         }
     }
 
@@ -207,5 +238,9 @@ public class LocationService {
 
     private String cabLocKey(String cabId) {
         return "cab:loc:" + cabId;
+    }
+
+    private String lockKey(String eventId) {
+        return "event:lock:" + eventId;
     }
 }
